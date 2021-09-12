@@ -4,8 +4,8 @@ param (
   [int] $shutSeconds=900,
   [bool] $startup=0
   )
-#run on at startup with C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden  -executionpolicy bypass  -command "& .\health.ps1" -creditMinutes 90 -maxDate "20:00" -start 0
-#run periodically with C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden  -executionpolicy bypass  -command "& .\health.ps1" -creditMinutes 90 -maxDate "20:00" -start 1
+#run on at startup with C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden  -executionpolicy bypass  -command "& .\health.ps1" -creditMinutes 90 -maxDate "21:00" -start 1
+#run periodically with C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden  -executionpolicy bypass  -command "& .\health.ps1" -creditMinutes 90 -maxDate "21:00"
 
 
 function Show-Notification {
@@ -29,58 +29,100 @@ function Show-Notification {
     $SerializedXml.LoadXml($RawXml.OuterXml)
 
     $Toast = [Windows.UI.Notifications.ToastNotification]::new($SerializedXml)
-    $Toast.Tag = "Parental Control"
-    $Toast.Group = "Parental Control"
+    $Toast.Tag = $ToastTitle
+    $Toast.Group = $ToastTitle
     $Toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(1)
 
-    $Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Parental Control")
+    $Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($ToastTitle)
     $Notifier.Show($Toast);
+}
+function Show-Notification-And-Popup {
+    [cmdletbinding()]
+    Param (
+        [string]
+        $ToastTitle,
+        [string]
+        [parameter(ValueFromPipeline)]
+        $ToastText
+    )
+    Show-Notification $ToastTitle $ToastText
+
+    [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
+    [System.Windows.Forms.MessageBox]::Show($ToastText, $ToastTitle)
+}
+
+#Import-LocalizedData -BindingVariable LocalText
+$LocalText = Data {
+#culture="fr-FR"
+ConvertFrom-StringData -StringData @'
+    title = Controle parental
+    expiredMaxdate = L'heure limite {0} est atteinte
+    expiredDuration = {0:hh}:{0:mm} dépasse la duree maximale de {1:hh}:{1:mm}
+    welcome = Bienvenue, Il reste {0:hh}:{0:mm} avant {1}
+'@
 }
 
 $todayMinutesFile = (Get-Date -Format "yyyy-MM-dd")+'.cnt'
 if (Test-Path $todayMinutesFile -PathType leaf)
 {
   #get previous time from file
-  $previousCount = Get-Content $todayMinutesFile
+  [int] $previousCount = Get-Content $todayMinutesFile
   #add time from previous file creation
   if($startup)
   {
   
     #ignore time elapsed from previous count
-    $todayElapsedMinutes = $previousCount
+    [int] $todayElapsedMinutes = [math]::round($previousCount)
     [bool] $greet = 1
   }
   else
   {
     #command tick, update ellapsed time from previous time dump
-    $elapsedSinceFile = (New-TimeSpan -start (Get-Item $todayMinutesFile).LastWriteTime).totalminutes
-    $todayElapsedMinutes = $elapsedSinceFile + $previousCount
+    [int] $elapsedMinutesSinceFileWritten = [math]::round((New-TimeSpan -start (Get-Item $todayMinutesFile).LastWriteTime).totalminutes)
+    [int] $todayElapsedMinutes = $elapsedMinutesSinceFileWritten + $previousCount
   }
 }
 else
 {
   #first time of day
   [bool] $greet = 1
-  $todayElapsedMinutes=0
+  #initialize elapsed duration to 0
+  [int] $todayElapsedMinutes=0
 }
+
+
 #set current time modification and remaining credit
 Write $todayElapsedMinutes > $todayMinutesFile
 
 #check $creditMinutes
-$remainingMinutes=$creditMinutes - $todayElapsedMinutes
+[int] $remainingMinutes=$creditMinutes - $todayElapsedMinutes
+[bool] $expiredFromDuration = $remainingMinutes -le 0;
 
 #check $maxDate 
-$minutesToMaxDate = (new-timespan -end (get-date $maxDate ) ).totalminutes
-$cappedRemainingMinutes =  [math]::Min($minutesToMaxDate, $remainingMinutes)
+[int] $minutesToMaxDate = (new-timespan -end (get-date $maxDate ) ).totalminutes
+[bool] $expiredFromMaxDate = $minutesToMaxDate -le 0;
 
-if( $greet )
-{
-  Show-Notification "Controle parental" "Bienvenue, $cappedRemainingMinutes minutes avant $maxDate pour aujourd'hui"
-}
 
-if ( ($cappedRemainingMinutes -le 0) )
+#actual shutdown
+if ( $expiredFromMaxDate -or $expiredFromDuration )
 {
-  [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
-  [System.Windows.Forms.MessageBox]::Show("Fini", "PC")
   & shutdown /s /t $shutSeconds
 }
+
+#notification messages
+if ( $expiredFromMaxDate )
+{
+  Show-Notification-And-Popup -ToastTitle $LocalText.title -ToastText ($LocalText.expiredMaxDate -f $maxDate)
+}
+elseif ( $expiredFromDuration )
+{
+  [TimeSpan] $todayElapsedTime = new-timespan -minutes $todayElapsedMinutes
+  [TimeSpan] $maxTimeDuration = new-timespan -minutes $creditMinutes
+  Show-Notification-And-Popup -ToastTitle $LocalText.title -ToastText ($LocalText.expiredDuration -f $todayElapsedTime, $maxTimeDuration)
+}
+elseif( $greet )
+{
+  [TimeSpan] $remainingTime = new-timespan -minutes $remainingMinutes
+  Show-Notification -ToastTitle $LocalText.title -ToastText ($LocalText.welcome -f $remainingTime,$maxDate)
+}
+
